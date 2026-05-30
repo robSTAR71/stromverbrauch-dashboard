@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Energie.Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #080c18; color: #e0f7f4; font-family: 'DM Mono', monospace; min-height: 100vh; padding-bottom: 60px; }
+.header { padding: 40px 40px 24px; border-bottom: 1px solid rgba(0,229,194,0.08); margin-bottom: 32px; display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 16px; }
+.subtitle { font-size: 11px; letter-spacing: 4px; color: #00e5c2; text-transform: uppercase; margin-bottom: 8px; }
+h1 { font-family: 'Syne', sans-serif; font-size: clamp(28px,5vw,48px); font-weight: 800; color: #fff; line-height: 1; }
+h1 span { color: #00e5c2; }
+.content { padding: 0 40px; }
+.refresh-btn { cursor: pointer; padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(0,229,194,0.3); background: rgba(0,229,194,0.05); color: #00e5c2; font-family: 'DM Mono', monospace; font-size: 12px; }
+.last-updated { font-size: 11px; color: #3a6a66; margin-top: 8px; text-align: right; }
+.date-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 32px; }
+.date-chip { cursor: pointer; padding: 6px 14px; border-radius: 20px; font-size: 12px; border: 1px solid rgba(0,229,194,0.2); background: rgba(0,229,194,0.05); color: #8ab8b4; font-family: 'DM Mono', monospace; }
+.date-chip.active { background: rgba(0,229,194,0.15); border-color: #00e5c2; color: #00e5c2; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 40px; }
+.stat-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(0,229,194,0.12); border-radius: 12px; padding: 20px 24px; }
+.stat-label { font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: #4a7a75; margin-bottom: 10px; }
+.stat-value { font-size: clamp(14px,2vw,18px); font-weight: 500; line-height: 1.2; }
+.chart-title { font-size: 11px; letter-spacing: 3px; text-transform: uppercase; color: #4a7a75; margin-bottom: 20px; }
+.chart-wrap { margin-bottom: 40px; }
+.error { background: rgba(255,100,100,0.1); border: 1px solid rgba(255,100,100,0.3); border-radius: 12px; padding: 24px; color: #ff8080; }
+.loading { text-align: center; padding: 60px 0; color: #4a7a75; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="subtitle">Stromverbrauch Monitor</div>
+    <h1>Energie<span>.</span>Dashboard</h1>
+  </div>
+  <div>
+    <button class="refresh-btn" onclick="fetchData()">⟳ Aktualisieren</button>
+    <div class="last-updated" id="lastUpdated"></div>
+  </div>
+</div>
+<div class="content">
+  <div id="status" class="loading">Lade Daten…</div>
+  <div id="dateChips" class="date-chips"></div>
+  <div id="stats" class="stats" style="display:none"></div>
+  <div id="charts"></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const API_URL = "https://script.google.com/macros/s/AKfycbyxL3taLYzoeoHgrHiAFkvoZipQ1lUEdi3gRdyt-Hzl3_d2X5vV1OczPMs_PSVdUroSmg/exec";
+
+let allData = {}, selectedDate = null, charts = {};
+
+function parseRow(cols) {
+  if (!cols || cols.length < 3) return null;
+  const raw = String(cols[0] || "").trim();
+  let date = null;
+
+  // ISO format: 2026-05-28T22:00:00.000Z
+  if (raw.match(/^\d{4}-\d{2}-\d{2}T/)) {
+    date = new Date(raw);
+    // Adjust for UTC offset (Austria = UTC+2)
+    date = new Date(date.getTime() + 2 * 60 * 60 * 1000);
+  }
+  // German format: 28.05.2026 00:00
+  else {
+    const m = raw.match(/(\d{1,2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
+    if (m) date = new Date(`${m[3]}-${m[2]}-${String(m[1]).padStart(2,"0")}T${m[4]}:${m[5]}:00`);
+  }
+  if (!date || isNaN(date)) return null;
+
+  let kwh = typeof cols[2] === "number" ? cols[2] : parseFloat(String(cols[2]).replace(",","."));
+  if (isNaN(kwh)) return null;
+  // Werte über 10 sind in Wh → umrechnen
+  if (kwh > 10) kwh = kwh / 1000;
+
+  return { date, kwh };
+}
+
+function formatDateKey(date) {
+  return `${String(date.getDate()).padStart(2,"0")}.${String(date.getMonth()+1).padStart(2,"0")}.${date.getFullYear()}`;
+}
+
+async function fetchData() {
+  document.getElementById("status").innerHTML = "⟳ Lade Daten…";
+  document.getElementById("status").style.display = "block";
+  document.getElementById("stats").style.display = "none";
+  document.getElementById("charts").innerHTML = "";
+  document.getElementById("dateChips").innerHTML = "";
+
+  try {
+    const res = await fetch(API_URL);
+    if (!res.ok) throw new Error("Status " + res.status);
+    const rows = await res.json();
+
+    allData = {};
+    for (let i = 1; i < rows.length; i++) {
+      const parsed = parseRow(rows[i]);
+      if (!parsed) continue;
+      const { date, kwh } = parsed;
+      const key = formatDateKey(date);
+      if (!allData[key]) allData[key] = [];
+      allData[key].push({
+        date, kwh,
+        time: `${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`,
+        hour: date.getHours()
+      });
+    }
+
+    if (Object.keys(allData).length === 0) throw new Error("Keine Daten erkannt. Bitte Apps Script URL prüfen.");
+
+    document.getElementById("status").style.display = "none";
+    document.getElementById("lastUpdated").textContent = "Zuletzt: " + new Date().toLocaleTimeString("de-AT");
+
+    const dates = Object.keys(allData).sort((a,b) => {
+      const [da,ma,ya]=a.split("."); const [db,mb,yb]=b.split(".");
+      return new Date(`${yb}-${mb}-${db}`) - new Date(`${ya}-${ma}-${da}`);
+    });
+
+    document.getElementById("dateChips").innerHTML = dates.map(d =>
+      `<button class="date-chip" onclick="selectDate('${d}')" id="chip-${d.replace(/\./g,'-')}">${d}</button>`
+    ).join("");
+
+    selectDate(dates[0]);
+  } catch(e) {
+    document.getElementById("status").innerHTML = `<div class="error"><strong>⚠ Fehler beim Laden</strong><br>${e.message}</div>`;
+  }
+}
+
+function selectDate(date) {
+  if (selectedDate) {
+    const old = document.getElementById("chip-"+selectedDate.replace(/\./g,"-"));
+    if (old) old.classList.remove("active");
+  }
+  selectedDate = date;
+  const chip = document.getElementById("chip-"+date.replace(/\./g,"-"));
+  if (chip) chip.classList.add("active");
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const data = allData[selectedDate] || [];
+  const total = data.reduce((s,d)=>s+d.kwh,0);
+  const avg = data.length ? total/data.length : 0;
+
+  const hours = {};
+  data.forEach(({hour,kwh}) => { hours[hour]=(hours[hour]||0)+kwh; });
+  const hourlyArr = Array.from({length:24},(_,h)=>({hour:`${String(h).padStart(2,"0")}:00`,kwh:+(hours[h]||0).toFixed(3)}));
+  const peakH = hourlyArr.reduce((a,b)=>b.kwh>a.kwh?b:a);
+
+  document.getElementById("stats").style.display = "grid";
+  document.getElementById("stats").innerHTML = [
+    {label:"Tagesverbrauch", value:`${total.toFixed(3)} kWh`, color:"#00e5c2"},
+    {label:"Spitzenstunde", value:`${peakH.hour} (${peakH.kwh.toFixed(3)} kWh)`, color:"#ff6b6b"},
+    {label:"Ø pro 15 Min", value:`${avg.toFixed(4)} kWh`, color:"#7eb8ff"},
+    {label:"Tage gesamt", value:Object.keys(allData).length, color:"#ffd166"},
+  ].map(s=>`<div class="stat-card"><div class="stat-label">${s.label}</div><div class="stat-value" style="color:${s.color}">${s.value}</div></div>`).join("");
+
+  const chartsEl = document.getElementById("charts");
+  const hasTrend = Object.keys(allData).length > 1;
+  chartsEl.innerHTML = `
+    <div class="chart-wrap"><div class="chart-title">Tagesverlauf — 15-Min-Intervalle</div><canvas id="chartDay" height="80"></canvas></div>
+    <div class="chart-wrap"><div class="chart-title">Verbrauch je Stunde</div><canvas id="chartHour" height="60"></canvas></div>
+    ${hasTrend?'<div class="chart-wrap"><div class="chart-title">Tagesvergleich</div><canvas id="chartTrend" height="50"></canvas></div>':''}
+  `;
+
+  Object.values(charts).forEach(c=>c.destroy());
+  charts = {};
+
+  const grid = "rgba(255,255,255,0.04)", tick = "#3a6a66", font = {family:"DM Mono",size:10};
+
+  charts.day = new Chart(document.getElementById("chartDay"),{type:"line",data:{
+    labels:data.map(d=>d.time),
+    datasets:[{data:data.map(d=>d.kwh),borderColor:"#00e5c2",borderWidth:1.5,fill:true,backgroundColor:"rgba(0,229,194,0.08)",pointRadius:0,tension:0.3}]
+  },options:{plugins:{legend:{display:false}},scales:{x:{grid:{color:grid},ticks:{color:tick,maxTicksLimit:12,font}},y:{grid:{color:grid},ticks:{color:tick,font}}}}});
+
+  charts.hour = new Chart(document.getElementById("chartHour"),{type:"bar",data:{
+    labels:hourlyArr.map(h=>h.hour),
+    datasets:[{data:hourlyArr.map(h=>h.kwh),backgroundColor:"rgba(0,229,194,0.7)",borderRadius:3}]
+  },options:{plugins:{legend:{display:false}},scales:{x:{grid:{color:grid},ticks:{color:tick,font:{family:"DM Mono",size:9}}},y:{grid:{color:grid},ticks:{color:tick,font}}}}});
+
+  if (hasTrend) {
+    const tDates = Object.keys(allData).sort((a,b)=>{
+      const [da,ma,ya]=a.split("."); const [db,mb,yb]=b.split(".");
+      return new Date(`${ya}-${ma}-${da}`) - new Date(`${yb}-${mb}-${db}`);
+    }).reverse();
+    charts.trend = new Chart(document.getElementById("chartTrend"),{type:"bar",data:{
+      labels:tDates,
+      datasets:[{data:tDates.map(d=>+allData[d].reduce((s,r)=>s+r.kwh,0).toFixed(3)),backgroundColor:"rgba(126,184,255,0.7)",borderRadius:4}]
+    },options:{plugins:{legend:{display:false}},scales:{x:{grid:{color:grid},ticks:{color:tick,font}},y:{grid:{color:grid},ticks:{color:tick,font}}}}});
+  }
+}
+
+fetchData();
+</script>
+</body>
+</html>
